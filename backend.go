@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgproto3/v2"
+	"github.com/jackc/pgtype"
+	"github.com/pkg/errors"
 	_ "github.com/trinodb/trino-go-client/trino"
 )
 
@@ -105,44 +107,47 @@ func (p *Backend) handleQuery(msg *pgproto3.Query) error {
 		return fmt.Errorf("error executing a Trino query: %w", err)
 	}
 	defer rows.Close()
-	// TODO figure out the response shape
-	names := make([]string, 0)
 
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			// Check for a scan error.
-			// Query rows will be closed with defer.
-			return fmt.Errorf("error scanning a Trino query response row: %w", err)
-		}
-		names = append(names, name)
+	columns, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("error getting Trino query response columns: %w", err)
 	}
-	// If the database is being written to ensure to check for Close
-	// errors that may be returned from the driver. The query may
-	// encounter an auto-commit error and be forced to rollback changes.
-	rerr := rows.Close()
-	if rerr != nil {
-		return fmt.Errorf("error closing rows: %w", rerr)
-	}
-
-	// Rows.Err will report the last error encountered by Rows.Scan.
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error processing rows: %w", err)
-	}
-
-	buf := (&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{
-		{
-			Name:                 []byte("fortune"),
+	fields := make([]pgproto3.FieldDescription, len(columns))
+	vals := make([]interface{}, len(columns))
+	for i, column := range columns {
+		// TODO map types to OIDs and size
+		fields[i] = pgproto3.FieldDescription{
+			Name:                 []byte(column.Name()),
 			TableOID:             0,
 			TableAttributeNumber: 0,
 			DataTypeOID:          25,
 			DataTypeSize:         -1,
 			TypeModifier:         -1,
 			Format:               0,
-		},
-	}}).Encode(nil)
-	response := "aaaaa"
-	buf = (&pgproto3.DataRow{Values: [][]byte{[]byte(response)}}).Encode(buf)
+		}
+		vals[i] = new(interface{})
+	}
+	buf := (&pgproto3.RowDescription{Fields: fields}).Encode(nil)
+
+	for rows.Next() {
+		if err := rows.Scan(vals...); err != nil {
+			return fmt.Errorf("error scanning a Trino query response row: %w", err)
+		}
+
+		dataRow, err := buildDataRow(vals, columns)
+		if err != nil {
+			return fmt.Errorf("error building data row: %w", err)
+		}
+		buf = dataRow.Encode(buf)
+	}
+	rerr := rows.Close()
+	if rerr != nil {
+		return fmt.Errorf("error closing rows: %w", rerr)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error processing rows: %w", err)
+	}
+
 	buf = (&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}).Encode(buf)
 	buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
 	_, err = p.conn.Write(buf)
@@ -150,6 +155,58 @@ func (p *Backend) handleQuery(msg *pgproto3.Query) error {
 		return fmt.Errorf("error writing query response: %w", err)
 	}
 	return nil
+}
+
+func buildDataRow(values []interface{}, columns []*sql.ColumnType) (*pgproto3.DataRow, error) {
+	dr := &pgproto3.DataRow{
+		Values: make([][]byte, len(values)),
+	}
+
+	for i, rawVal := range values {
+		var backendVal interface{}
+		ptr, ok := rawVal.(*interface{})
+		if !ok {
+			return nil, errors.Errorf("values[%d] (%+v) expected to be a pointer", i, columns[i])
+		}
+		switch v := (*ptr).(type) {
+		case string:
+			backendVal = &pgtype.Text{String: v, Status: pgtype.Present}
+		case int16:
+			backendVal = &pgtype.Int2{Int: v, Status: pgtype.Present}
+		case int32:
+			backendVal = &pgtype.Int4{Int: v, Status: pgtype.Present}
+		case int64:
+			backendVal = &pgtype.Int8{Int: v, Status: pgtype.Present}
+		case float32:
+			backendVal = &pgtype.Float4{Float: v, Status: pgtype.Present}
+		case float64:
+			backendVal = &pgtype.Float8{Float: v, Status: pgtype.Present}
+		default:
+			return nil, errors.Errorf("Unknown scan type %T", v)
+		}
+
+		enc, ok := backendVal.(pgtype.TextEncoder)
+		if ok {
+			buf, err := enc.EncodeText(nil, nil)
+			if err != nil {
+				return nil, errors.Errorf("failed to encode values[%d] (%+v)", i, columns[i])
+			}
+			dr.Values[i] = buf
+			continue
+		}
+		benc, ok := backendVal.(pgtype.BinaryEncoder)
+		if ok {
+			buf, err := benc.EncodeBinary(nil, nil)
+			if err != nil {
+				return nil, errors.Errorf("failed to encode values[%d] (%+v)", i, columns[i])
+			}
+			dr.Values[i] = buf
+			continue
+		}
+		return nil, errors.Errorf("values[%d] (%+v) does not implement TextExcoder or BinaryEncoder", i, columns[i])
+	}
+
+	return dr, nil
 }
 
 func (p *Backend) Close() error {
