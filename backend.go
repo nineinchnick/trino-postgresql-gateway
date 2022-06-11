@@ -61,6 +61,7 @@ func (p *Backend) Run() error {
 				return fmt.Errorf("error handling a Query message: %w", err)
 			}
 		case *pgproto3.Terminate:
+			// this is a graceful request to close the connection, no cleanup is necessary here
 			return nil
 		default:
 			return fmt.Errorf("received message other than Query from client: %#v", msg)
