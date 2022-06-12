@@ -5,6 +5,7 @@
 *.so
 *.dylib
 /trino-postgresql-gateway
+/dist
 
 # Test binary, built with `go test -c`
 *.test
