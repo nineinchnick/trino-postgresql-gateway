@@ -12,15 +12,52 @@ is not complete yet.
 
 ## Usage
 
-Since there are no releases yet, it needs to be built before running, so
-a working installation of Go >=1.18 is required:
-
+Start the server, pointing it to a Trino cluster:
 ```bash
-go run github.com/nineinchnick/trino-postgresql-gateway -listen localhost:5432 -target localhost:8080
+./trino-postgresql-gateway -target http://user@localhost:8080
 ```
 
-## Authentication
+Then connect to it using any PostgreSQL client, like `psql`:
+```bash
+psql -h localhost -U aaa -c 'select * from tpch.tiny.nation limit 2'
+```
+
+To run the latest version directly from the `main` branch:
+
+```bash
+go run github.com/nineinchnick/trino-postgresql-gateway -listen localhost:5432 -target http://localhost:8080
+```
+
+## Limitations
+
+### Authentication
 
 There's no authentication for PostgreSQL clients.
 
 Trino authentication has to be specified in the `-target` option.
+
+### Data types
+
+Only basic data types are supported, like `VARCHAR`, `INTEGER` and `DOUBLE`.
+
+### Multiple queries
+
+Simple queries are not being split, so if multiple queries are send together
+they'll fail to execute.
+
+### Prepared statements
+
+Prepared statements are supported, but PostgreSQL uses positional placeholders
+like `$1`, which are replaced with `?` using a plain regular expression.
+This means it might break queries that contain strings like this in literal
+values or quoted identifiers.
+
+### Canceling queries
+
+Trino queries execute with a fixed timeout of 1 minute and cannot be cancelled.
+
+### Error reporting
+
+Trino query errors are not decoded into PostgreSQL errors, so only an error
+message is returned, without details like the number of query line and column
+where an error ocurred.
