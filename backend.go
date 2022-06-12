@@ -503,7 +503,7 @@ func (p *Backend) getStmtRows() (*sql.Rows, error) {
 		return p.stmtRows, nil
 	}
 
-	log.Println("INFO: Forwarding prepared query with", p.stmtParams)
+	log.Println("INFO: Forwarding prepared query")
 	var err error
 	p.stmtRows, err = p.stmt.QueryContext(p.ctx, p.stmtParams...)
 	if err != nil {
@@ -521,6 +521,7 @@ func (p *Backend) writeRows(rows *sql.Rows) error {
 		return fmt.Errorf("error getting Trino query response columns: %w", err)
 	}
 
+	// TODO build this from columns
 	vals := make([]interface{}, len(columns))
 	for i := range columns {
 		vals[i] = new(interface{})
@@ -533,7 +534,7 @@ func (p *Backend) writeRows(rows *sql.Rows) error {
 			return fmt.Errorf("error scanning a Trino query response row: %w", err)
 		}
 
-		dataRow, err := buildDataRow(vals, columns)
+		dataRow, err := p.buildDataRow(vals, columns)
 		if err != nil {
 			return fmt.Errorf("error building data row: %w", err)
 		}
@@ -577,18 +578,23 @@ func buildRowDescription(columns []*sql.ColumnType) (*pgproto3.RowDescription, e
 	fields := make([]pgproto3.FieldDescription, len(columns))
 	for i, column := range columns {
 		var oid pgtype.OID
+		var size int16 = -1
 		s := column.ScanType()
 		switch s {
 		case reflect.TypeOf(sql.NullString{}):
 			oid = pgtype.VarcharOID
 		case reflect.TypeOf(sql.NullInt16{}):
 			oid = pgtype.Int2OID
+			size = 2
 		case reflect.TypeOf(sql.NullInt32{}):
 			oid = pgtype.Int4OID
+			size = 4
 		case reflect.TypeOf(sql.NullInt64{}):
 			oid = pgtype.Int8OID
+			size = 8
 		case reflect.TypeOf(sql.NullFloat64{}):
 			oid = pgtype.Float8OID
+			size = 8
 		default:
 			return nil, errors.Errorf("Unknown scan type %T", s)
 		}
@@ -597,16 +603,16 @@ func buildRowDescription(columns []*sql.ColumnType) (*pgproto3.RowDescription, e
 			TableOID:             0,
 			TableAttributeNumber: 0,
 			DataTypeOID:          uint32(oid),
-			DataTypeSize:         -1,
+			DataTypeSize:         size,
 			TypeModifier:         -1,
-			Format:               pgproto3.BinaryFormat,
+			Format:               pgproto3.TextFormat,
 		}
 	}
 
 	return &pgproto3.RowDescription{Fields: fields}, nil
 }
 
-func buildDataRow(values []interface{}, columns []*sql.ColumnType) (*pgproto3.DataRow, error) {
+func (p *Backend) buildDataRow(values []interface{}, columns []*sql.ColumnType) (*pgproto3.DataRow, error) {
 	dr := &pgproto3.DataRow{
 		Values: make([][]byte, len(values)),
 	}
@@ -639,7 +645,7 @@ func buildDataRow(values []interface{}, columns []*sql.ColumnType) (*pgproto3.Da
 			return nil, errors.Errorf("Unknown scan type %T", v)
 		}
 
-		dr.Values[i], err = backendVal.EncodeBinary(nil, nil)
+		dr.Values[i], err = backendVal.EncodeText(p.connInfo, nil)
 		if err != nil {
 			err = errors.Errorf("failed to encode values[%d] (%+v)", i, columns[i])
 			return nil, newSoftError(pgerrcode.InvalidParameterValue, err)
