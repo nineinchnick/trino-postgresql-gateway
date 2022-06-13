@@ -10,6 +10,10 @@ It does not implement 100% client functionality and it is using
 [the Trino Go client](https://github.com/trinodb/trino-go-client), which itself
 is not complete yet.
 
+It does NOT parse PostgreSQL queries and expects ANSII SQL queries supported by
+Trino. To fully support PostgreSQL queries, it would be better to implement it
+as a [PostgreSQL Foreign Data Wrapper (FDW)](https://www.postgresql.org/docs/current/ddl-foreign-data.html)
+
 ## Usage
 
 Start the server, pointing it to a Trino cluster:
@@ -61,3 +65,10 @@ Trino queries execute with a fixed timeout of 1 minute and cannot be cancelled.
 Trino query errors are not decoded into PostgreSQL errors, so only an error
 message is returned, without details like the number of query line and column
 where an error ocurred.
+
+### Metadata
+
+Most PostgreSQL tools that support schema discovery (like listing tables)
+do so by querying the PostgreSQL's [system catalogs](https://www.postgresql.org/docs/current/catalogs.html).
+They're not available in Trino. To read metadata, query
+the `information_schema` schema.
